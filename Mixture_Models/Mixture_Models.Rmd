@@ -1,0 +1,197 @@
+---
+title: "Tutorial for Mixture Models"
+output: 
+  learnr::tutorial:
+    progressive: true
+    allow_skip: true
+runtime: shiny_prerendered
+---
+
+```{r setup, include=FALSE}
+library(learnr)
+library(gradethis)
+
+tutorial_options(exercise.timelimit = 60, exercise.checker = gradethis::grade_learnr)
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+library(tidyverse)
+library(beetroot)
+```
+
+## A brief introduction to mixture models
+
+### Mixture densities
+
+Mixture models are a type of model designed for situation where the data stem from different, unknown groups. A classic example are the eruptions times of the Old Faithful geyser in Yellowstone National Park, USA. 
+
+```{r}
+faithful %>% 
+  ggplot(aes(x = eruptions)) + geom_histogram()
+```
+
+The erution times are either around 2 minutes or around 4.5 minutes. The assumption we are going to make here is that there are two different processes at work, resulting in either a shorter or longer eruption. While longer eruptions seem more common than shorter ones, both types fairly normally distributed. So we could describe the shorter eruptions through a normal density with mean 2 and the longer ones through a normal distribution with mean 4.5. 
+
+We can describe the distribution of _all_ of the Old Faithful eruptions through a mixture of two normal densities, with the weights for the two densities representing how common short and longer eruptions are.
+
+<!-- FIXME: add plot with two estimated densities and their mixture -->
+```{r}
+library(flexmix)
+set.seed(3)
+mm_of <- flexmix(eruptions ~ 1, k = 2, data = faithful)
+#parameters(mm_of)
+#prior(mm_of)
+density_1 <- function(x){ 
+  prior(mm_of)[1] * dnorm(x, mean = parameters(mm_of, component = 1)[1],
+                          sd = parameters(mm_of, component = 1)[2])
+}
+density_2 <- function(x){ 
+  prior(mm_of)[2] * dnorm(x, mean = parameters(mm_of, component = 2)[1],
+                          sd = parameters(mm_of, component = 2)[2])
+}
+density_mix <- function(x){
+  density_1(x) + density_2(x)
+}
+
+of <- tibble(eruptions = seq(from = 1.6, to = 5.1, by = 0.01)) %>% 
+  mutate(d_1 = density_1(eruptions),
+         d_2 = density_2(eruptions),
+         d_mix = density_mix(eruptions))
+
+faithful %>% 
+  ggplot(aes(x = eruptions)) +
+  geom_histogram(aes(y = ..density..)) +
+  geom_line(aes(x = eruptions, y = d_1, col = I("red")), data = of) +
+  geom_line(aes(x = eruptions, y = d_2, col = I("blue")), data = of) 
+#+ geom_line(aes(x = eruptions, y = d_mix, col = I("red")), data = of)
+```
+
+
+
+### Mixture models
+
+We know a little more about Old Faithful: we also know the waiting time between eruptions.
+
+```{r}
+faithful %>% 
+  ggplot(aes(x = waiting, y = eruptions)) +
+  geom_point() 
+```
+
+If we want to model eruption time based on the waiting time, we could use a simple linear model.
+
+```{r}
+faithful %>% 
+  ggplot(aes(x = waiting, y = eruptions)) +  
+  geom_point() + 
+  geom_smooth(method = "lm")
+```
+
+However, we are assuming that the two clusters stem from two different processes. Why would we assume that the relationship between eruption and waiting time is the same for both?
+
+If we split the data at an eruption time of 3 minutes and estimate a separate linear model for both groups, we see that the slope is steeper for the long eruptions.
+
+```{r}
+faithful %>% 
+  mutate(group = factor(eruptions < 3, levels = c(TRUE, FALSE), labels = c("short", "long"))) %>% 
+  ggplot(aes(x = waiting, y = eruptions)) +
+  geom_point() + 
+  geom_smooth(method = "lm") + 
+  facet_wrap(~ group)
+```
+
+A mixture model extends the idea of mixture densities to models. The mixture model is a weighted sum of components, just like the mixture density. However, the components are now models instead of densities. 
+
+
+### Quiz
+
+
+```{r quiz_prep}
+dgp <- function(reg = TRUE){
+  w <- c(0.4, 0.6)
+  intercept <- c(2,4)
+  slope <- if (reg) c(-0.05, 0.05) else c(0, 0)
+  n <- 1000
+  
+  df1 <- tibble(waiting = rnorm(n*w[1], 55, 10),
+                eruptions = intercept[1] + slope[1] * waiting + rnorm(n*w[1]),
+                cl = 1)
+  df2 <- tibble(waiting = rnorm(n*w[2], 110, 10),
+                eruptions = intercept[2] + slope[2] * waiting + rnorm(n*w[2]),
+                cl = 2)
+  bind_rows(df1, df2)
+}
+
+my_reg <- sample(x = c(0,1), size = 2, replace = FALSE) %>% as.logical()
+df <- map_dfr(my_reg, ~ dgp(reg = .)) 
+
+df %>% 
+  mutate(scenario = c("A", "B")[rep(1:2, each = 1000)]) %>% 
+  ggplot(aes(waiting, eruptions)) + 
+  geom_point() + facet_wrap(~ scenario)
+
+```
+
+```{r quiz_reg}
+question("In which scenario would you expect the relationship between the waiting time and the duration of the eruption to vary between clusters?",
+         answer("Scenario A", correct = my_reg[1]),
+         answer("Scenario B", correct = my_reg[2]),
+         allow_retry = TRUE
+)
+
+```
+
+## Fitting a mixture model with {beetroot}
+
+The package **beetroot** implements **parsnip** bindings for mixture models so that you can use your usual tidymodels syntax. 
+
+```{r echo=TRUE}
+# remotes::install_github("hfrick/beetroot")
+library(beetroot)
+```
+The function to specify your model is `mixture_model()` and takes the number of `components` as an argument. The beetroot package currently uses the **flexmix** package for the estimation so you need to set your engine to `"flexmix"` with the `set_engine()` function.
+
+```{r echo=TRUE}
+mm_spec <- mixture_model(components = 2) %>% 
+  set_engine("flexmix")
+```
+
+You can now fit your mixture model with the `fit()` function. You can specify the relationship captured by the components via the usual formula interface, here `eruptions ~ waiting`. The dataset is specified via the `data` argument.
+
+```{r echo=TRUE}
+mm_fit <- mm_spec %>%
+  fit(eruptions ~ waiting, data = faithful)
+```
+
+_Tutorial extension: add test/train split to workflow and predict on the test set._
+
+
+### Exercise
+
+```{r}
+df <- df %>% 
+  mutate(scenario = c("A", "B")[rep(1:2, each = 1000)]) %>% 
+  filter(scenario == c("A", "B")[my_reg])
+```
+
+Fit a mixture model with 2 components for `r c("Scenario A", "Scenario B")[my_reg]` on the data in data frame `df`.
+
+```{r fit_beetroot, exercise=TRUE, exercise.lines = 5}
+
+```
+
+```{r fit_beetroot-hint}
+?beetroot::mixture_model
+```
+
+```{r fit_beetroot-solution}
+mixture_model(components = 2) %>% 
+  set_engine("flexmix") %>% 
+  fit(eruptions ~ waiting, data = df)
+```
+
+```{r fit_beetroot-check}
+grade_code("Well done!")
+```
+
+
+
